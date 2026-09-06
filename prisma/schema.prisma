@@ -1,0 +1,323 @@
+// Restaurant Loyalty PWA — data model
+//
+// The rule that shapes everything here: a customer belongs to the company, not
+// to a branch. Only a Transaction carries a branchId. That is what lets points
+// earned in one branch be spent in another while branch reporting still works.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------- branches
+
+model Branch {
+  id        String   @id @default(cuid())
+  // Short code printed on the branch's counter poster next to its QR — lets a
+  // customer without a QR-capable camera type it in instead of scrolling a
+  // 16-branch dropdown.
+  code      String   @unique
+  name      String
+  nameAr    String? // Arabic name
+  address   String?
+  addressAr String?
+  phone     String?
+  hours     String?
+  city      String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  // Customers pick a "home" branch at sign-up. It is a preference for
+  // reporting and offers only — it never limits where they can earn or spend.
+  homeCustomers Customer[]    @relation("HomeBranch")
+  staff         Staff[]
+  transactions  Transaction[]
+  offers        OfferBranch[]
+
+  @@index([isActive])
+}
+
+// ---------------------------------------------------------------- customers
+
+model Customer {
+  id        String    @id @default(cuid())
+  mobile    String    @unique // E.164, the login identity
+  name      String
+  email     String?
+  birthday  DateTime? @db.Date
+  language  String    @default("en") // "en" | "ar"
+  isBlocked Boolean   @default(false)
+
+  homeBranchId String?
+  homeBranch   Branch? @relation("HomeBranch", fields: [homeBranchId], references: [id])
+
+  // Denormalised running totals. The PointsLedger remains the source of truth;
+  // these exist so the loyalty card loads without summing the whole ledger.
+  pointsBalance Int       @default(0)
+  visitCount    Int       @default(0)
+  totalSpend    Decimal   @default(0) @db.Decimal(12, 2)
+  lastVisitAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  qrTokens        QrToken[]
+  transactions    Transaction[]
+  pointsLedger    PointsLedger[]
+  customerRewards CustomerReward[]
+
+  @@index([homeBranchId])
+  @@index([createdAt])
+  @@index([lastVisitAt])
+}
+
+// One-time codes for sign-up and sign-in. Kept as rows rather than in memory so
+// a restart does not strand someone mid-registration.
+model OtpCode {
+  id        String    @id @default(cuid())
+  mobile    String
+  codeHash  String // hashed, never stored in the clear
+  purpose   String    @default("register") // "register" | "login"
+  attempts  Int       @default(0)
+  expiresAt DateTime
+  consumedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  // Registration details are held here until the number is verified, so no
+  // half-made Customer rows exist for numbers that never confirm.
+  pendingName     String?
+  pendingEmail    String?
+  pendingBirthday DateTime? @db.Date
+  pendingBranchId String?
+
+  @@index([mobile, purpose])
+  @@index([expiresAt])
+}
+
+// The QR shown on the loyalty card. Short-lived by design: a screenshot shared
+// with a friend stops working once the token expires.
+model QrToken {
+  id         String    @id @default(cuid())
+  token      String    @unique
+  customerId String
+  customer   Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  expiresAt  DateTime
+  usedAt     DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([customerId])
+  @@index([expiresAt])
+}
+
+// ---------------------------------------------------------------- staff
+
+model Staff {
+  id       String  @id @default(cuid())
+  username String  @unique
+  name     String
+  pinHash  String // scrypt hash of the till PIN
+  role     Role    @default(CASHIER)
+  isActive Boolean @default(true)
+
+  // Cashiers and branch managers are tied to one branch. Company and super
+  // admins have none, which is what grants them every branch.
+  branchId String?
+  branch   Branch? @relation(fields: [branchId], references: [id])
+
+  createdAt DateTime @default(now())
+  lastLogin DateTime?
+
+  transactions Transaction[]
+  auditLogs    AuditLog[]
+
+  @@index([branchId])
+}
+
+enum Role {
+  SUPER_ADMIN
+  COMPANY_ADMIN
+  BRANCH_MANAGER
+  CASHIER
+}
+
+// ---------------------------------------------------------------- transactions
+
+model Transaction {
+  id            String   @id @default(cuid())
+  customerId    String
+  customer      Customer @relation(fields: [customerId], references: [id])
+  branchId      String
+  branch        Branch   @relation(fields: [branchId], references: [id])
+  staffId       String?
+  staff         Staff?   @relation(fields: [staffId], references: [id])
+
+  invoiceNumber String
+  amount        Decimal  @db.Decimal(12, 2)
+  pointsEarned  Int      @default(0)
+  discountGiven Decimal  @default(0) @db.Decimal(12, 2)
+
+  isReversed Boolean   @default(false)
+  reversedAt DateTime?
+  reverseReason String?
+
+  createdAt DateTime @default(now())
+
+  pointsLedger    PointsLedger[]
+  customerRewards CustomerReward[]
+
+  // Stops the same bill earning points twice. Scoped per branch because branches
+  // may each number their own invoices — if the client confirms numbers are
+  // globally unique this becomes a plain @unique on invoiceNumber.
+  @@unique([branchId, invoiceNumber])
+  @@index([customerId])
+  @@index([branchId, createdAt])
+  @@index([createdAt])
+}
+
+// Every point movement, never edited. The balance is the sum of these rows, so
+// a wrong entry is reversed rather than overwritten — which is what makes the
+// audit trail the document asks for possible.
+model PointsLedger {
+  id            String      @id @default(cuid())
+  customerId    String
+  customer      Customer    @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  transactionId String?
+  transaction   Transaction? @relation(fields: [transactionId], references: [id])
+
+  delta  Int // positive to earn, negative to redeem
+  reason String // "purchase" | "redeem" | "welcome" | "referral" | "birthday" | "correction" | "expiry"
+  note   String?
+
+  createdAt DateTime @default(now())
+  expiresAt DateTime? // set when points expire after a period
+
+  @@index([customerId, createdAt])
+  @@index([expiresAt])
+}
+
+// ---------------------------------------------------------------- rewards
+
+model Reward {
+  id     String @id @default(cuid())
+  name   String
+  nameAr String?
+  description   String?
+  descriptionAr String?
+
+  type      RewardType
+  threshold Int // points needed, or visit number
+  value     Decimal    @default(0) @db.Decimal(12, 2) // discount amount or item value
+  isPercent Boolean    @default(false)
+
+  validDays Int?     @default(30) // days the reward stays claimable once issued
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  customerRewards CustomerReward[]
+
+  @@index([isActive])
+}
+
+enum RewardType {
+  WELCOME // given on registration
+  POINTS // unlocked at a points threshold
+  VISITS // unlocked at a visit count
+  BIRTHDAY
+  REFERRAL
+  MANUAL
+}
+
+// A reward that has actually been issued to one customer.
+model CustomerReward {
+  id         String   @id @default(cuid())
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  rewardId   String
+  reward     Reward   @relation(fields: [rewardId], references: [id])
+
+  status      RewardStatus @default(AVAILABLE)
+  issuedAt    DateTime     @default(now())
+  expiresAt   DateTime?
+  redeemedAt  DateTime?
+
+  // Which visit consumed it — the record that stops a reward being used twice.
+  redeemedTxId String?
+  redeemedTx   Transaction? @relation(fields: [redeemedTxId], references: [id])
+
+  @@index([customerId, status])
+  @@index([expiresAt])
+}
+
+enum RewardStatus {
+  AVAILABLE
+  REDEEMED
+  EXPIRED
+}
+
+// ---------------------------------------------------------------- offers
+
+// Campaigns, as opposed to earned rewards. Scope is decided by the join table:
+// no rows means every branch, some rows means only those branches.
+model Offer {
+  id     String @id @default(cuid())
+  name   String
+  nameAr String?
+  description   String?
+  descriptionAr String?
+
+  discountValue Decimal @default(0) @db.Decimal(12, 2)
+  isPercent     Boolean @default(true)
+
+  segment   String? // null = everyone, else "vip" | "inactive" | ...
+  startsAt  DateTime?
+  endsAt    DateTime?
+  isActive  Boolean   @default(true)
+  createdAt DateTime  @default(now())
+
+  branches OfferBranch[]
+
+  @@index([isActive])
+}
+
+model OfferBranch {
+  offerId  String
+  offer    Offer  @relation(fields: [offerId], references: [id], onDelete: Cascade)
+  branchId String
+  branch   Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  @@id([offerId, branchId])
+}
+
+// ---------------------------------------------------------------- audit
+
+model AuditLog {
+  id      String  @id @default(cuid())
+  staffId String?
+  staff   Staff?  @relation(fields: [staffId], references: [id])
+
+  action     String // "transaction.create" | "points.correct" | "reward.redeem" | ...
+  entityType String?
+  entityId   String?
+  reason     String?
+  metadata   Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([staffId])
+  @@index([action])
+}
+
+// ---------------------------------------------------------------- settings
+
+// Loyalty rules live here rather than in code so they can be changed without a
+// deploy — the document asks for them to be configurable.
+model Setting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
