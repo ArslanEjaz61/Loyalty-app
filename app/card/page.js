@@ -22,6 +22,11 @@ export default function Card() {
   const router = useRouter();
   const [data, setData] = useState(null);
   const [err, setErr] = useState("");
+  const [redeem, setRedeem] = useState({
+    staffUsername: "", staffPin: "", invoiceNumber: "", amount: "", redeemRewardId: "",
+  });
+  const [redeemBusy, setRedeemBusy] = useState(false);
+  const [redeemMsg, setRedeemMsg] = useState(null);
 
   const load = useCallback(async () => {
     try {
@@ -69,6 +74,36 @@ export default function Card() {
   const available = rewards.filter((r) => r.status === "AVAILABLE");
   const past = rewards.filter((r) => r.status !== "AVAILABLE");
 
+  const setR = (k) => (e) => setRedeem((x) => ({ ...x, [k]: e.target.value }));
+
+  async function submitRedeem(e) {
+    e.preventDefault();
+    setRedeemBusy(true);
+    setRedeemMsg(null);
+    try {
+      const r = await fetch(apiUrl("/api/redeem"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          staffUsername: redeem.staffUsername,
+          staffPin: redeem.staffPin,
+          invoiceNumber: redeem.invoiceNumber,
+          amount: redeem.amount,
+          redeemRewardId: redeem.redeemRewardId || undefined,
+        }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "Could not record the visit.");
+      setRedeemMsg({ type: "ok", text: `Visit recorded — +${d.transaction.pointsEarned} points` });
+      setRedeem({ staffUsername: "", staffPin: "", invoiceNumber: "", amount: "", redeemRewardId: "" });
+      load();
+    } catch (e2) {
+      setRedeemMsg({ type: "err", text: String(e2.message || e2) });
+    } finally {
+      setRedeemBusy(false);
+    }
+  }
+
   return (
     <div className="shell">
       <div className="brandbar">
@@ -93,6 +128,46 @@ export default function Card() {
             reading eight characters aloud is faster than troubleshooting it. */}
         <div className="cardcode">{qr.code}</div>
         <div className="qrhint">Show the code at the counter · refreshes automatically</div>
+      </div>
+
+      <div className="card">
+        <h2>For staff at the counter</h2>
+        <p className="sub">Hand your phone over — staff enter their own code below to record this visit.</p>
+        <form onSubmit={submitRedeem}>
+          <div className="field">
+            <label className="label" htmlFor="staffUsername">Staff username</label>
+            <input id="staffUsername" className="input" value={redeem.staffUsername} onChange={setR("staffUsername")} autoComplete="off" />
+          </div>
+          <div className="field">
+            <label className="label" htmlFor="staffPin">Staff PIN</label>
+            <input id="staffPin" className="input" type="password" inputMode="numeric" value={redeem.staffPin} onChange={setR("staffPin")} autoComplete="off" />
+          </div>
+          <div className="field">
+            <label className="label" htmlFor="invoiceNumber">Invoice number</label>
+            <input id="invoiceNumber" className="input" placeholder="e.g. INV-2291" value={redeem.invoiceNumber} onChange={setR("invoiceNumber")} />
+          </div>
+          <div className="field">
+            <label className="label" htmlFor="amount">Bill amount</label>
+            <input id="amount" className="input" type="number" inputMode="decimal" placeholder="e.g. 120" value={redeem.amount} onChange={setR("amount")} />
+          </div>
+          {available.length > 0 && (
+            <div className="field">
+              <label className="label" htmlFor="redeemRewardId">Apply a reward <span className="opt">(optional)</span></label>
+              <select id="redeemRewardId" className="select" value={redeem.redeemRewardId} onChange={setR("redeemRewardId")}>
+                <option value="">No reward</option>
+                {available.map((r) => (
+                  <option key={r.id} value={r.id}>{r.name} — {r.isPercent ? `${r.value}% off` : `${currency} ${r.value}`}</option>
+                ))}
+              </select>
+            </div>
+          )}
+          <button className="btn" type="submit" disabled={redeemBusy}>
+            {redeemBusy ? <><span className="spin" /> Validating…</> : "Validate & save visit"}
+          </button>
+        </form>
+        {redeemMsg && (
+          <div className={redeemMsg.type === "ok" ? "note" : "err"}>{redeemMsg.text}</div>
+        )}
       </div>
 
       <div className="stats">
