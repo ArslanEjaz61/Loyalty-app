@@ -32,23 +32,45 @@ export async function POST(req) {
     return NextResponse.json({ error: "Invalid request." }, { status: 400 });
   }
 
-  const { token: rawToken, invoiceNumber, amount, redeemRewardId } = body || {};
+  const {
+    token: rawToken,
+    customerId: lookedUpCustomerId,
+    invoiceNumber,
+    amount,
+    redeemRewardId,
+  } = body || {};
 
   const token = normalizeCode(rawToken);
   const invoice = String(invoiceNumber || "").trim();
   const value = Number(amount);
 
-  if (!token) return NextResponse.json({ error: "Scan the customer's code first." }, { status: 400 });
+  if (!token && !lookedUpCustomerId) {
+    return NextResponse.json({ error: "Scan or look up the customer first." }, { status: 400 });
+  }
   if (!invoice) return NextResponse.json({ error: "Enter the invoice number." }, { status: 400 });
   if (!Number.isFinite(value) || value <= 0) {
     return NextResponse.json({ error: "Enter a valid bill amount." }, { status: 400 });
   }
 
-  const qr = await prisma.qrToken.findUnique({ where: { token }, include: { customer: true } });
-  if (!qr) return NextResponse.json({ error: "Code not recognised." }, { status: 404 });
-  if (qr.usedAt) return NextResponse.json({ error: "This code has already been used." }, { status: 409 });
-  if (qr.expiresAt < new Date()) {
-    return NextResponse.json({ error: "The code expired. Please scan again." }, { status: 410 });
+  // Two ways in: a scanned/typed QR code, or a customer the signed-in staff
+  // member looked up by name or number. Both are staff-initiated.
+  let qr = null;
+  let customer;
+  if (token) {
+    qr = await prisma.qrToken.findUnique({ where: { token }, include: { customer: true } });
+    if (!qr) return NextResponse.json({ error: "Code not recognised." }, { status: 404 });
+    if (qr.usedAt) return NextResponse.json({ error: "This code has already been used." }, { status: 409 });
+    if (qr.expiresAt < new Date()) {
+      return NextResponse.json({ error: "The code expired. Please scan again." }, { status: 410 });
+    }
+    customer = qr.customer;
+  } else {
+    customer = await prisma.customer.findUnique({ where: { id: String(lookedUpCustomerId) } });
+    if (!customer) return NextResponse.json({ error: "Customer not found." }, { status: 404 });
+  }
+
+  if (customer.isBlocked) {
+    return NextResponse.json({ error: "This account is not active." }, { status: 403 });
   }
 
   // Cashiers are tied to their branch; an admin acting at a till must say which.
@@ -79,12 +101,15 @@ export async function POST(req) {
     );
   }
 
-  const customerId = qr.customerId;
+  const customerId = customer.id;
   const pointsEarned = await pointsForAmount(value);
   const expiryDays = await getNumber("points_expiry_days");
 
   // Validate the redemption before opening the write transaction.
   let redeeming = null;
+  // A points reward costs what it was priced at — redeeming it spends the
+  // points rather than leaving the balance untouched.
+  let pointsSpent = 0;
   if (redeemRewardId) {
     redeeming = await prisma.customerReward.findFirst({
       where: { id: redeemRewardId, customerId, status: "AVAILABLE" },
@@ -95,6 +120,15 @@ export async function POST(req) {
     }
     if (redeeming.expiresAt && redeeming.expiresAt < new Date()) {
       return NextResponse.json({ error: "That reward has expired." }, { status: 409 });
+    }
+    if (redeeming.reward.type === "POINTS") {
+      pointsSpent = redeeming.reward.threshold;
+      if (customer.pointsBalance < pointsSpent) {
+        return NextResponse.json(
+          { error: `This reward costs ${pointsSpent} points and the balance is ${customer.pointsBalance}.` },
+          { status: 409 }
+        );
+      }
     }
   }
 
@@ -132,20 +166,36 @@ export async function POST(req) {
         where: { id: redeeming.id },
         data: { status: "REDEEMED", redeemedAt: new Date(), redeemedTxId: trx.id },
       });
+
+      if (pointsSpent > 0) {
+        // Its own ledger row, so the statement reads as earn-then-spend rather
+        // than one netted figure nobody can explain later.
+        await tx.pointsLedger.create({
+          data: {
+            customerId,
+            transactionId: trx.id,
+            delta: -pointsSpent,
+            reason: "reward_redemption",
+          },
+        });
+      }
     }
 
-    const customer = await tx.customer.update({
+    const updatedCustomer = await tx.customer.update({
       where: { id: customerId },
       data: {
-        pointsBalance: { increment: pointsEarned },
+        pointsBalance: { increment: pointsEarned - pointsSpent },
         visitCount: { increment: 1 },
         totalSpend: { increment: value },
         lastVisitAt: new Date(),
       },
     });
 
-    // Burn the QR so the same scan cannot be replayed.
-    await tx.qrToken.update({ where: { id: qr.id }, data: { usedAt: new Date() } });
+    // Burn the QR so the same scan cannot be replayed. Nothing to burn when
+    // staff found the customer by look-up instead.
+    if (qr) {
+      await tx.qrToken.update({ where: { id: qr.id }, data: { usedAt: new Date() } });
+    }
 
     await tx.auditLog.create({
       data: {
@@ -159,12 +209,14 @@ export async function POST(req) {
           invoiceNumber: invoice,
           amount: value,
           pointsEarned,
+          pointsSpent,
           redeemedRewardId: redeeming?.id ?? null,
+          via: qr ? "qr" : "staff_lookup",
         },
       },
     });
 
-    return { trx, customer };
+    return { trx, customer: updatedCustomer };
   });
 
   // Anything the new totals just unlocked.
@@ -199,6 +251,7 @@ export async function POST(req) {
       invoiceNumber: invoice,
       amount: value,
       pointsEarned,
+      pointsSpent,
       discountGiven,
     },
     customer: {

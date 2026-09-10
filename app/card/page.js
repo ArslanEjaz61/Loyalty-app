@@ -22,11 +22,10 @@ export default function Card() {
   const router = useRouter();
   const [data, setData] = useState(null);
   const [err, setErr] = useState("");
-  const [redeem, setRedeem] = useState({
-    staffUsername: "", staffPin: "", invoiceNumber: "", amount: "", redeemRewardId: "",
-  });
-  const [redeemBusy, setRedeemBusy] = useState(false);
-  const [redeemMsg, setRedeemMsg] = useState(null);
+  const [editing, setEditing] = useState(false);
+  const [profile, setProfile] = useState({ name: "", email: "", birthday: "" });
+  const [profileBusy, setProfileBusy] = useState(false);
+  const [profileMsg, setProfileMsg] = useState(null);
 
   const load = useCallback(async () => {
     try {
@@ -70,39 +69,42 @@ export default function Card() {
     );
   }
 
-  const { customer, qr, rewards, transactions, nextTargets, currency } = data;
+  const { customer, qr, rewards, transactions, offers, nextTargets, currency } = data;
   const available = rewards.filter((r) => r.status === "AVAILABLE");
   const past = rewards.filter((r) => r.status !== "AVAILABLE");
 
-  const setR = (k) => (e) => setRedeem((x) => ({ ...x, [k]: e.target.value }));
+  function openEditor() {
+    setProfile({
+      name: customer.name || "",
+      email: customer.email || "",
+      birthday: customer.birthday ? String(customer.birthday).slice(0, 10) : "",
+    });
+    setProfileMsg(null);
+    setEditing(true);
+  }
 
-  async function submitRedeem(e) {
+  async function saveProfile(e) {
     e.preventDefault();
-    setRedeemBusy(true);
-    setRedeemMsg(null);
+    setProfileBusy(true);
+    setProfileMsg(null);
     try {
-      const r = await fetch(apiUrl("/api/redeem"), {
-        method: "POST",
+      const r = await fetch(apiUrl("/api/profile"), {
+        method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          staffUsername: redeem.staffUsername,
-          staffPin: redeem.staffPin,
-          invoiceNumber: redeem.invoiceNumber,
-          amount: redeem.amount,
-          redeemRewardId: redeem.redeemRewardId || undefined,
-        }),
+        body: JSON.stringify(profile),
       });
       const d = await r.json();
-      if (!r.ok) throw new Error(d.error || "Could not record the visit.");
-      setRedeemMsg({ type: "ok", text: `Visit recorded — +${d.transaction.pointsEarned} points` });
-      setRedeem({ staffUsername: "", staffPin: "", invoiceNumber: "", amount: "", redeemRewardId: "" });
+      if (!r.ok) throw new Error(d.error || "Could not save your details.");
+      setProfileMsg({ type: "ok", text: "Saved." });
+      setEditing(false);
       load();
     } catch (e2) {
-      setRedeemMsg({ type: "err", text: String(e2.message || e2) });
+      setProfileMsg({ type: "err", text: String(e2.message || e2) });
     } finally {
-      setRedeemBusy(false);
+      setProfileBusy(false);
     }
   }
+
 
   return (
     <div className="shell">
@@ -128,46 +130,6 @@ export default function Card() {
             reading eight characters aloud is faster than troubleshooting it. */}
         <div className="cardcode">{qr.code}</div>
         <div className="qrhint">Show the code at the counter · refreshes automatically</div>
-      </div>
-
-      <div className="card">
-        <h2>For staff at the counter</h2>
-        <p className="sub">Hand your phone over — staff enter their own code below to record this visit.</p>
-        <form onSubmit={submitRedeem}>
-          <div className="field">
-            <label className="label" htmlFor="staffUsername">Staff username</label>
-            <input id="staffUsername" className="input" value={redeem.staffUsername} onChange={setR("staffUsername")} autoComplete="off" />
-          </div>
-          <div className="field">
-            <label className="label" htmlFor="staffPin">Staff PIN</label>
-            <input id="staffPin" className="input" type="password" inputMode="numeric" value={redeem.staffPin} onChange={setR("staffPin")} autoComplete="off" />
-          </div>
-          <div className="field">
-            <label className="label" htmlFor="invoiceNumber">Invoice number</label>
-            <input id="invoiceNumber" className="input" placeholder="e.g. INV-2291" value={redeem.invoiceNumber} onChange={setR("invoiceNumber")} />
-          </div>
-          <div className="field">
-            <label className="label" htmlFor="amount">Bill amount</label>
-            <input id="amount" className="input" type="number" inputMode="decimal" placeholder="e.g. 120" value={redeem.amount} onChange={setR("amount")} />
-          </div>
-          {available.length > 0 && (
-            <div className="field">
-              <label className="label" htmlFor="redeemRewardId">Apply a reward <span className="opt">(optional)</span></label>
-              <select id="redeemRewardId" className="select" value={redeem.redeemRewardId} onChange={setR("redeemRewardId")}>
-                <option value="">No reward</option>
-                {available.map((r) => (
-                  <option key={r.id} value={r.id}>{r.name} — {r.isPercent ? `${r.value}% off` : `${currency} ${r.value}`}</option>
-                ))}
-              </select>
-            </div>
-          )}
-          <button className="btn" type="submit" disabled={redeemBusy}>
-            {redeemBusy ? <><span className="spin" /> Validating…</> : "Validate & save visit"}
-          </button>
-        </form>
-        {redeemMsg && (
-          <div className={redeemMsg.type === "ok" ? "note" : "err"}>{redeemMsg.text}</div>
-        )}
       </div>
 
       <div className="stats">
@@ -229,6 +191,77 @@ export default function Card() {
             ))}
           </>
         )}
+      </div>
+
+      {offers?.length > 0 && (
+        <div className="card">
+          <h2>Offers for you</h2>
+          {offers.map((o) => (
+            <div key={o.id} className="reward-row">
+              <div className="ic" style={{ background: "var(--gold-soft)", color: "var(--gold)" }}>%</div>
+              <div>
+                <div className="nm">{o.name}</div>
+                <div className="ds">
+                  {o.description || (o.isPercent ? `${o.value}% off` : `${currency} ${o.value} off`)}
+                  {o.everywhere ? " · all branches" : " · selected branches"}
+                </div>
+              </div>
+              {o.endsAt && <span className="pill">till {new Date(o.endsAt).toLocaleDateString()}</span>}
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="card">
+        <h2>Your details</h2>
+        {!editing ? (
+          <>
+            <div className="tx-row">
+              <div><div className="b">{customer.name}</div><div className="d">{customer.mobile}</div></div>
+            </div>
+            <div className="tx-row">
+              <div><div className="b">Email</div><div className="d">{customer.email || "—"}</div></div>
+            </div>
+            <div className="tx-row">
+              <div>
+                <div className="b">Date of birth</div>
+                <div className="d">
+                  {customer.birthday ? new Date(customer.birthday).toLocaleDateString() : "—"}
+                </div>
+              </div>
+            </div>
+            <button className="btn-ghost sm" type="button" onClick={openEditor}>Edit details</button>
+            {profileMsg?.type === "ok" && <div className="note">{profileMsg.text}</div>}
+          </>
+        ) : (
+          <form onSubmit={saveProfile}>
+            <div className="field">
+              <label className="label" htmlFor="pname">Full name</label>
+              <input id="pname" className="input" value={profile.name}
+                     onChange={(e) => setProfile((p) => ({ ...p, name: e.target.value }))} />
+            </div>
+            <div className="field">
+              <label className="label" htmlFor="pemail">Email</label>
+              <input id="pemail" className="input" type="email" value={profile.email}
+                     onChange={(e) => setProfile((p) => ({ ...p, email: e.target.value }))} />
+            </div>
+            <div className="field">
+              <label className="label" htmlFor="pdob">
+                Date of birth <span className="opt">— for your birthday gift</span>
+              </label>
+              <input id="pdob" className="input" type="date" value={profile.birthday}
+                     onChange={(e) => setProfile((p) => ({ ...p, birthday: e.target.value }))} />
+            </div>
+            <button className="btn" type="submit" disabled={profileBusy}>
+              {profileBusy ? <><span className="spin" /> Saving…</> : "Save"}
+            </button>
+            <button className="btn-ghost sm" type="button" onClick={() => setEditing(false)}>Cancel</button>
+            {profileMsg?.type === "err" && <div className="err">{profileMsg.text}</div>}
+          </form>
+        )}
+        <p className="sub" style={{ marginTop: 12 }}>
+          Points, visits and rewards are added by staff at the counter — they cannot be changed from here.
+        </p>
       </div>
 
       <div className="card">

@@ -24,6 +24,8 @@ export default function Staff() {
   const [scanning, setScanning] = useState(false);
   const [canScan, setCanScan] = useState(false);
   const [scanHint, setScanHint] = useState("");
+  const [search, setSearch] = useState("");
+  const [searchResults, setSearchResults] = useState(null);
 
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
@@ -176,6 +178,26 @@ export default function Staff() {
     finally { setBusy(false); }
   }
 
+  async function doSearch(e) {
+    e?.preventDefault();
+    setBusy(true); setErr(""); setResult(null);
+    try {
+      const r = await fetch(apiUrl(`/api/staff/search?q=${encodeURIComponent(search.trim())}`));
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "Could not search.");
+      setSearchResults(d.customers);
+    } catch (e2) { setErr(String(e2.message || e2)); }
+    finally { setBusy(false); }
+  }
+
+  function pickCustomer(c) {
+    // Same shape the scan endpoint returns, minus the one-time token: this
+    // customer was identified by look-up, not by a code.
+    setScanned({ token: null, customer: c, availableRewards: c.availableRewards });
+    setSearchResults(null);
+    setSearch("");
+  }
+
   async function submitBill(e) {
     e.preventDefault();
     setBusy(true); setErr("");
@@ -184,7 +206,8 @@ export default function Staff() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          token: scanned.token,
+          token: scanned.token || undefined,
+          customerId: scanned.token ? undefined : scanned.customer.id,
           invoiceNumber: bill.invoiceNumber,
           amount: bill.amount,
           redeemRewardId: bill.redeemRewardId || undefined,
@@ -324,6 +347,39 @@ export default function Staff() {
                     onClick={() => doScan(manualToken)}>
               {busy ? <><span className="spin" /> Checking…</> : "Look up"}
             </button>
+          )}
+
+          {!scanning && (
+            <form onSubmit={doSearch} style={{ marginTop: 18, borderTop: "1px solid var(--line)", paddingTop: 16 }}>
+              <div className="field">
+                <label className="label" htmlFor="cs">No card handy? Search by name or number</label>
+                <input id="cs" className="input" placeholder="e.g. Imran, or 50 123 4567"
+                       value={search} onChange={(e) => setSearch(e.target.value)} autoComplete="off" />
+              </div>
+              <button className="btn btn-ghost" type="submit" disabled={busy || search.trim().length < 3}>
+                {busy ? <><span className="spin" /> Searching…</> : "Search"}
+              </button>
+            </form>
+          )}
+
+          {searchResults && (
+            searchResults.length === 0 ? (
+              <div className="empty">No customer matched that.</div>
+            ) : (
+              searchResults.map((c) => (
+                <button key={c.id} type="button" className="tx-row"
+                        onClick={() => pickCustomer(c)}
+                        style={{ width: "100%", textAlign: "left", background: "none", border: "none", cursor: "pointer" }}>
+                  <div>
+                    <div className="b">{c.name}</div>
+                    <div className="d">
+                      {c.mobile} · {c.pointsBalance} pts · {c.visitCount} visits
+                    </div>
+                  </div>
+                  <div className="p">Select</div>
+                </button>
+              ))
+            )
           )}
 
           {err && <div className="err">{err}</div>}

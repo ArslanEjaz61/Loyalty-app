@@ -41,6 +41,13 @@ export default function Admin() {
   // audit tab
   const [audit, setAudit] = useState(null);
 
+  // offers tab
+  const [offers, setOffers] = useState(null);
+  const [newOffer, setNewOffer] = useState({
+    name: "", description: "", value: "", isPercent: true, branchIds: [], startsAt: "", endsAt: "",
+  });
+  const [offerMsg, setOfferMsg] = useState(null);
+
   const loadOverview = useCallback(async () => {
     setErr("");
     try {
@@ -72,13 +79,52 @@ export default function Admin() {
     } catch { /* keep last good */ }
   }, []);
 
+  const loadOffers = useCallback(async () => {
+    try {
+      const r = await fetch(apiUrl("/api/admin/offers"));
+      const d = await r.json();
+      if (r.ok) setOffers(d);
+    } catch { /* keep last good */ }
+  }, []);
+
   // Try the session that may already exist from the till screen.
   useEffect(() => { loadOverview(); }, [loadOverview]);
 
   useEffect(() => {
     if (session && tab === "customers") loadCustomers();
     if (session && tab === "audit") loadAudit();
-  }, [session, tab, loadCustomers, loadAudit]);
+    if (session && tab === "offers") loadOffers();
+  }, [session, tab, loadCustomers, loadAudit, loadOffers]);
+
+  async function createOffer(e) {
+    e.preventDefault();
+    setBusy(true); setOfferMsg(null);
+    try {
+      const r = await fetch(apiUrl("/api/admin/offers"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(newOffer),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "Could not create the offer.");
+      setOfferMsg({ type: "ok", text: "Offer created." });
+      setNewOffer({ name: "", description: "", value: "", isPercent: true, branchIds: [], startsAt: "", endsAt: "" });
+      loadOffers();
+    } catch (e2) {
+      setOfferMsg({ type: "err", text: String(e2.message || e2) });
+    } finally { setBusy(false); }
+  }
+
+  async function toggleOffer(id, isActive) {
+    try {
+      const r = await fetch(apiUrl("/api/admin/offers"), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, isActive }),
+      });
+      if (r.ok) loadOffers();
+    } catch { /* leave the list as it was */ }
+  }
 
   async function doLogin(e) {
     e.preventDefault();
@@ -153,7 +199,7 @@ export default function Admin() {
       </div>
 
       <div className="tabs">
-        {["overview", "customers", "staff", "audit"].map((t) => (
+        {["overview", "customers", "offers", "staff", "audit"].map((t) => (
           <button key={t} className={`tab ${tab === t ? "on" : ""}`} onClick={() => { setTab(t); setPage(1); }}>
             {t}
           </button>
@@ -334,6 +380,134 @@ export default function Admin() {
       )}
 
       {/* ---------------- staff ---------------- */}
+      {/* ---------------- offers ---------------- */}
+      {tab === "offers" && (
+        <>
+          {offers?.canEdit && (
+            <div className="card">
+              <h2>New offer</h2>
+              <form onSubmit={createOffer}>
+                <div className="two-col">
+                  <div className="field">
+                    <label className="label" htmlFor="oname">Name</label>
+                    <input id="oname" className="input" placeholder="e.g. Weekend 20% off"
+                           value={newOffer.name}
+                           onChange={(e) => setNewOffer((o) => ({ ...o, name: e.target.value }))} />
+                  </div>
+                  <div className="field">
+                    <label className="label" htmlFor="oval">Discount</label>
+                    <div className="phone-row">
+                      <select className="select cc" value={newOffer.isPercent ? "pct" : "amt"}
+                              onChange={(e) => setNewOffer((o) => ({ ...o, isPercent: e.target.value === "pct" }))}>
+                        <option value="pct">%</option>
+                        <option value="amt">AED</option>
+                      </select>
+                      <input id="oval" className="input" type="number" inputMode="decimal" placeholder="20"
+                             value={newOffer.value}
+                             onChange={(e) => setNewOffer((o) => ({ ...o, value: e.target.value }))} />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="field">
+                  <label className="label" htmlFor="odesc">Description <span className="opt">(optional)</span></label>
+                  <input id="odesc" className="input" placeholder="What the customer sees"
+                         value={newOffer.description}
+                         onChange={(e) => setNewOffer((o) => ({ ...o, description: e.target.value }))} />
+                </div>
+
+                <div className="two-col">
+                  <div className="field">
+                    <label className="label" htmlFor="ostart">Starts <span className="opt">(optional)</span></label>
+                    <input id="ostart" className="input" type="date" value={newOffer.startsAt}
+                           onChange={(e) => setNewOffer((o) => ({ ...o, startsAt: e.target.value }))} />
+                  </div>
+                  <div className="field">
+                    <label className="label" htmlFor="oend">Ends <span className="opt">(optional)</span></label>
+                    <input id="oend" className="input" type="date" value={newOffer.endsAt}
+                           onChange={(e) => setNewOffer((o) => ({ ...o, endsAt: e.target.value }))} />
+                  </div>
+                </div>
+
+                <div className="field">
+                  <label className="label">
+                    Branches <span className="opt">— select none to run it everywhere</span>
+                  </label>
+                  <div className="tablewrap" style={{ maxHeight: 180, overflowY: "auto" }}>
+                    {offers.branches.map((b) => (
+                      <label key={b.id} className="tx-row" style={{ cursor: "pointer" }}>
+                        <div>
+                          <input type="checkbox" style={{ marginRight: 8 }}
+                                 checked={newOffer.branchIds.includes(b.id)}
+                                 onChange={(e) => setNewOffer((o) => ({
+                                   ...o,
+                                   branchIds: e.target.checked
+                                     ? [...o.branchIds, b.id]
+                                     : o.branchIds.filter((x) => x !== b.id),
+                                 }))} />
+                          <span className="b">{b.code} · {b.name}</span>
+                          <span className="d"> {b.city}</span>
+                        </div>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+
+                <button className="btn" type="submit" disabled={busy}>
+                  {busy ? <><span className="spin" /> Creating…</> : "Create offer"}
+                </button>
+                {offerMsg && <div className={offerMsg.type === "ok" ? "note" : "err"}>{offerMsg.text}</div>}
+              </form>
+            </div>
+          )}
+
+          <div className="card">
+            <h2>Offers &amp; campaigns</h2>
+            {!offers ? (
+              <div className="empty">Loading…</div>
+            ) : offers.offers.length === 0 ? (
+              <div className="empty">No offers yet.</div>
+            ) : (
+              <div className="tablewrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Offer</th><th>Discount</th><th>Where</th><th>Runs</th><th>Status</th>
+                      {offers.canEdit && <th></th>}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {offers.offers.map((o) => (
+                      <tr key={o.id}>
+                        <td>
+                          <div className="b">{o.name}</div>
+                          {o.description && <div className="d">{o.description}</div>}
+                        </td>
+                        <td>{o.isPercent ? `${o.value}%` : `AED ${o.value}`}</td>
+                        <td>{o.branches.length === 0 ? "All branches" : `${o.branches.length} branch${o.branches.length > 1 ? "es" : ""}`}</td>
+                        <td>
+                          {o.startsAt ? new Date(o.startsAt).toLocaleDateString() : "—"}
+                          {" → "}
+                          {o.endsAt ? new Date(o.endsAt).toLocaleDateString() : "—"}
+                        </td>
+                        <td><span className={`chip ${o.isLive ? "" : "off"}`}>{o.isLive ? "Live" : o.isActive ? "Scheduled" : "Paused"}</span></td>
+                        {offers.canEdit && (
+                          <td>
+                            <button className="btn-ghost sm" onClick={() => toggleOffer(o.id, !o.isActive)}>
+                              {o.isActive ? "Pause" : "Resume"}
+                            </button>
+                          </td>
+                        )}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
       {tab === "staff" && (
         <div className="card">
           <h2>Staff</h2>

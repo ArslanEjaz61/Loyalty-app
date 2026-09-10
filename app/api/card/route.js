@@ -74,6 +74,34 @@ export async function GET() {
     orderBy: { threshold: "asc" },
   });
 
+  // Offers with no branch rows are company-wide; the rest only show at the
+  // branches they were scoped to.
+  const now = new Date();
+  const offerRows = await prisma.offer.findMany({
+    where: {
+      isActive: true,
+      AND: [
+        { OR: [{ startsAt: null }, { startsAt: { lte: now } }] },
+        { OR: [{ endsAt: null }, { endsAt: { gte: now } }] },
+      ],
+    },
+    include: { branches: { select: { branchId: true } } },
+    orderBy: { createdAt: "desc" },
+    take: 20,
+  });
+
+  const offers = offerRows
+    .filter((o) => o.branches.length === 0 || o.branches.some((b) => b.branchId === customer.homeBranchId))
+    .map((o) => ({
+      id: o.id,
+      name: o.name,
+      description: o.description,
+      value: Number(o.discountValue),
+      isPercent: o.isPercent,
+      endsAt: o.endsAt,
+      everywhere: o.branches.length === 0,
+    }));
+
   const nextTargets = allRewards
     .map((r) => {
       if (r.type === "POINTS") {
@@ -92,6 +120,8 @@ export async function GET() {
       id: customer.id,
       name: customer.name,
       mobile: customer.mobile,
+      email: customer.email,
+      birthday: customer.birthday,
       language: customer.language,
       homeBranch: customer.homeBranch,
       pointsBalance: customer.pointsBalance,
@@ -121,6 +151,7 @@ export async function GET() {
       pointsEarned: t.pointsEarned,
       createdAt: t.createdAt,
     })),
+    offers,
     nextTargets,
     currency: settings.currency,
   });
